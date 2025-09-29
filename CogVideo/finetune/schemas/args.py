@@ -17,7 +17,7 @@ class Args(BaseModel):
     ########## Output ##########
     output_dir: Path = Path("train_results/{:%Y-%m-%d-%H-%M-%S}".format(datetime.datetime.now()))
     report_to: Literal["tensorboard", "wandb", "all"] | None = None
-    tracker_name: str = "SpaDiff-imgin-pure"
+    tracker_name: str = "explore-diffusion"
 
     ########## Data ###########
     data_root: Path

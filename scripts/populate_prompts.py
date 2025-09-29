@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import os, json
 
-IN_JSONL = "datasets/10by10/info_labels.jsonl"
-IMG_DIR  = "datasets/10by10/images"
-OUT_TXT  = "datasets/10by10/prompts.txt"
+IN_JSONL = "datasets/5by5/2path/info_labels.jsonl"
+IMG_DIR  = "datasets/5by5/2path/images"
+OUT_TXT  = "datasets/5by5/2path/prompts.txt"
 
 os.makedirs(os.path.dirname(OUT_TXT), exist_ok=True)
 

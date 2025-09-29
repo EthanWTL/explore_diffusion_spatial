@@ -1,8 +1,8 @@
 import os
 from glob import glob
 
-img_dir = "datasets/10by10/images"
-out_txt = "datasets/10by10/images.txt"
+img_dir = "datasets/5by5/2path/images"
+out_txt = "datasets/5by5/2path/images.txt"
 
 # Ensure parent folder for images.txt exists
 os.makedirs(os.path.dirname(out_txt), exist_ok=True)

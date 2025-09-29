@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """
-maze_gen.py
+maze_gen.py — fixed geometry with explicit anchor + axes drawn on the image
 
 Image:
-  python maze_gen.py image --rows 5 --cols 5 --seed 42 --out maze.png
-  # Optional: --start "r,c" --goal "r,c"
+  python maze_gen.py image --rows 10 --cols 10 --seed 42 --out mazes/maze.png
+  # Optional:
+  #   --start "r,c" --goal "r,c"
+  #   --canvas "720,480"
+  #   --cell_px 40
+  #   --anchor "x0,y0"
+  #   --wall_px 4
+  #   --knob_px 16
+  #   --no-grid  (disable light grid)
+  #   --no-axes  (disable tick labels "row"/"col")
 
-Dataset (JSONL + optional PNGs):
+Dataset:
   python maze_gen.py dataset --count 5000 --rows 10 --cols 10 --out info_labels.jsonl --png-dir mazes_out
 """
 
@@ -17,12 +25,35 @@ import random
 from collections import deque
 from typing import Dict, List, Tuple, Optional
 
-import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
-DIRS = {'N': (0, 1), 'S': (0, -1), 'E': (1, 0), 'W': (-1, 0)}
-OPP = {'N':'S', 'S':'N', 'E':'W', 'W':'E'}
-DIR_ORDER = ('N','E','S','W')  # for deterministic hashing
+# -------------------------
+# Defaults
+# -------------------------
+DEF_CANVAS_W = 720
+DEF_CANVAS_H = 480
+
+DEF_WALL_PX   = 4     # wall thickness (px)
+DEF_KNOB_PX   = 16    # start/goal circle diameter (px)
+DEF_GRID_GRAY = 220   # light grid color channel (None to disable)
+DEF_GRID_PX   = 1     # light grid thickness (px)
+
+# Axis pads reserve space for tick numbers + "row"/"col" captions
+AXIS_PAD_LEFT   = 34  # px
+AXIS_PAD_TOP    = 28  # px
+AXIS_PAD_RIGHT  = 8   # px
+AXIS_PAD_BOTTOM = 8   # px
+
+# Row increases downward, col increases rightward.
+DIRS = {'N': (-1, 0), 'S': (1, 0), 'E': (0, 1), 'W': (0, -1)}
+OPP  = {'N':'S', 'S':'N', 'E':'W', 'W':'E'}
+DIR_ORDER = ('N','E','S','W')  # deterministic hashing order
+
+
+# -------------------------
+# Maze generation
+# -------------------------
 
 def init_grid(rows: int, cols: int):
     return [[{'N': True, 'S': True, 'E': True, 'W': True, 'visited': False}
@@ -31,7 +62,8 @@ def init_grid(rows: int, cols: int):
 def in_bounds(r: int, c: int, rows: int, cols: int) -> bool:
     return 0 <= r < rows and 0 <= c < cols
 
-def carve_maze(grid, rows: int, cols: int, rng: random.Random, start_r: Optional[int]=None, start_c: Optional[int]=None):
+def carve_maze(grid, rows: int, cols: int, rng: random.Random,
+               start_r: Optional[int]=None, start_c: Optional[int]=None):
     if start_r is None:
         start_r = rng.randrange(rows)
     if start_c is None:
@@ -101,15 +133,20 @@ def encode_maze(grid, rows: int, cols: int) -> str:
     return hashlib.sha256(''.join(bits).encode('ascii')).hexdigest()
 
 def aggregate_segments_labels(true_path, rows: int, cols: int):
+    """
+    Returns (K, labels) where labels is [[dir_code, len_norm], ...]
+    dir_code: Right=0.00, Up=0.25, Left=0.50, Down=0.75
+    len_norm: segment length normalized by cols (horizontal) or rows (vertical)
+    """
     if len(true_path) <= 1:
         return 0, []
     segs = []
     pr, pc = true_path[0]
-    cur_step = (true_path[1][0] - pr, true_path[1][1] - pc)
+    cur_step = (true_path[1][0] - pr, true_path[1][1] - pc)  # (dr, dc)
     acc_dr, acc_dc = cur_step
     pr, pc = true_path[1]
     for (r, c) in true_path[2:]:
-        step = (r - pr, c - pc)
+        step = (r - pr, c - pc)  # (dr, dc)
         if step == cur_step:
             acc_dr += step[0]
             acc_dc += step[1]
@@ -122,71 +159,178 @@ def aggregate_segments_labels(true_path, rows: int, cols: int):
 
     def to_dir_and_len(seg):
         dr, dc = seg
-        if dr > 0 and dc == 0:      # right
-            return 0.0, abs(dr) / rows
-        if dr < 0 and dc == 0:      # left
-            return 0.5, abs(dr) / rows
-        if dc > 0 and dr == 0:      # up
-            return 0.25, abs(dc) / cols
-        if dc < 0 and dr == 0:      # down
-            return 0.75, abs(dc) / cols
+        if dc > 0 and dr == 0:      # right
+            return 0.00, abs(dc) / cols
+        if dc < 0 and dr == 0:      # left
+            return 0.50, abs(dc) / cols
+        if dr < 0 and dc == 0:      # up
+            return 0.25, abs(dr) / rows
+        if dr > 0 and dc == 0:      # down
+            return 0.75, abs(dr) / rows
         raise ValueError(f"Non-axis-aligned segment: {seg}")
 
     labels = [[round(d,4), round(l,4)] for (d,l) in map(to_dir_and_len, segs)]
     return len(segs), labels
 
-def draw_maze_image(grid, rows: int, cols: int, start, goal, out_png: str,
-                    wall_width: float = 3.5, grid_alpha: float = 0.25, grid_lw: float = 0.8):
-    inches = (7.2, 4.8)  # 720x480 @ 100 dpi
-    dpi = 100
-    fig = plt.figure(figsize=inches, dpi=dpi)
-    ax = fig.add_subplot(111)
-    ax.set_aspect('equal', adjustable='box')
-    ax.set_xlim(-0.5, rows - 0.5)
-    ax.set_ylim(-0.5, cols - 0.5)
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('white')
 
-    # Axis ticks at cell centers
-    ax.set_xticks(range(0, rows)); ax.set_xlabel("row")
-    ax.set_yticks(range(0, cols)); ax.set_ylabel("col")
+# -------------------------
+# Geometry helpers (anchor + axis pads)
+# -------------------------
 
-    # Alignment grid at cell borders (half-integers)
-    ax.set_axisbelow(True)
-    for xb in np.arange(-0.5, rows - 0.5 + 1, 1.0):
-        ax.plot([xb, xb], [-0.5, cols - 0.5], color='0.85', linewidth=grid_lw, alpha=grid_alpha, zorder=0)
-    for yb in np.arange(-0.5, cols - 0.5 + 1, 1.0):
-        ax.plot([-0.5, rows - 0.5], [yb, yb], color='0.85', linewidth=grid_lw, alpha=grid_alpha, zorder=0)
+def parse_pair(s: Optional[str]) -> Optional[Tuple[int,int]]:
+    if s is None:
+        return None
+    a, b = s.split(",")
+    return int(a), int(b)
+
+def compute_geometry(rows: int, cols: int,
+                     canvas: Tuple[int,int],
+                     cell_px: Optional[int],
+                     anchor: Optional[Tuple[int,int]],
+                     pads: Tuple[int,int,int,int]) -> Tuple[int,int,int,int,int]:
+    """
+    Returns (canvas_w, canvas_h, cell_px, x0, y0)
+
+    - canvas: (W,H)
+    - pads: (pad_left, pad_top, pad_right, pad_bottom) reserved for axes text.
+    - If cell_px is None, use largest integer that fits inside the *inner* region:
+        inner_w = W - pad_left - pad_right
+        inner_h = H - pad_top  - pad_bottom
+        cell_px = min(inner_w // cols, inner_h // rows)
+    - If anchor is None, center the maze rectangle inside the *inner* region.
+      If anchor is provided, it is taken as the absolute top-left (x0,y0) of the maze rectangle.
+    """
+    W, H = canvas
+    padL, padT, padR, padB = pads
+    inner_w = W - padL - padR
+    inner_h = H - padT - padB
+    if inner_w <= 0 or inner_h <= 0:
+        raise ValueError("Canvas too small for given axis pads.")
+
+    if cell_px is None:
+        cell_px = min(inner_w // cols, inner_h // rows)
+        if cell_px <= 0:
+            raise ValueError(f"Grid {rows}x{cols} too large for inner region {inner_w}x{inner_h}.")
+
+    maze_w = cols * cell_px
+    maze_h = rows * cell_px
+    if maze_w > inner_w or maze_h > inner_h:
+        raise ValueError("cell_px too large for inner region with axes pads.")
+
+    if anchor is None:
+        x0 = padL + (inner_w - maze_w) // 2
+        y0 = padT + (inner_h - maze_h) // 2
+    else:
+        x0, y0 = anchor  # absolute pixels from (0,0) top-left of canvas
+    return W, H, cell_px, x0, y0
+
+
+def cell_center_xy(r: int, c: int, cell_px: int, x0: int, y0: int) -> Tuple[float,float]:
+    x = x0 + (c + 0.5) * cell_px
+    y = y0 + (r + 0.5) * cell_px
+    return x, y
+
+
+# -------------------------
+# Drawing (pixel-perfect with axes)
+# -------------------------
+
+def _line(draw: ImageDraw.ImageDraw, x0, y0, x1, y1, w, color=(0,0,0)):
+    draw.line([(int(x0),int(y0)), (int(x1),int(y1))], fill=color, width=int(w))
+
+def _circle(draw: ImageDraw.ImageDraw, cx, cy, r, color):
+    x0, y0 = int(cx - r), int(cy - r)
+    x1, y1 = int(cx + r), int(cy + r)
+    draw.ellipse([x0, y0, x1, y1], fill=color, outline=None)
+
+def _load_font():
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+def draw_maze_image_fixed(
+    grid, rows: int, cols: int,
+    *,
+    canvas_w: int, canvas_h: int,
+    cell_px: int, x0: int, y0: int,
+    wall_px: int,
+    knob_px: int,
+    draw_grid: bool,
+    draw_axes: bool,
+    pads: Tuple[int,int,int,int],
+    start: Tuple[int,int],
+    goal: Tuple[int,int],
+    out_png: str,
+):
+    padL, padT, padR, padB = pads
+    maze_w = cols * cell_px
+    maze_h = rows * cell_px
+
+    im = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+    dr = ImageDraw.Draw(im)
+
+    # Optional light grid at cell borders (inside maze rect)
+    if draw_grid and DEF_GRID_GRAY is not None:
+        for cc in range(cols + 1):
+            x = x0 + cc * cell_px
+            _line(dr, x, y0, x, y0 + maze_h, DEF_GRID_PX, color=(DEF_GRID_GRAY,)*3)
+        for rr in range(rows + 1):
+            y = y0 + rr * cell_px
+            _line(dr, x0, y, x0 + maze_w, y, DEF_GRID_PX, color=(DEF_GRID_GRAY,)*3)
 
     # Outer border
-    ax.plot([-0.5, rows-0.5], [-0.5, -0.5], 'k-', linewidth=wall_width, zorder=1)
-    ax.plot([-0.5, rows-0.5], [cols-0.5, cols-0.5], 'k-', linewidth=wall_width, zorder=1)
-    ax.plot([-0.5, -0.5], [-0.5, cols-0.5], 'k-', linewidth=wall_width, zorder=1)
-    ax.plot([rows-0.5, rows-0.5], [-0.5, cols-0.5], 'k-', linewidth=wall_width, zorder=1)
+    _line(dr, x0,         y0,          x0 + maze_w, y0,          wall_px)  # top
+    _line(dr, x0,         y0+maze_h,   x0 + maze_w, y0+maze_h,   wall_px)  # bottom
+    _line(dr, x0,         y0,          x0,          y0 + maze_h, wall_px)  # left
+    _line(dr, x0+maze_w,  y0,          x0+maze_w,   y0 + maze_h, wall_px)  # right
 
-    # Inner walls
+    # Inner walls per cell
     for r in range(rows):
         for c in range(cols):
             cell = grid[r][c]
-            cx, cy = r, c
+            xL = x0 + c * cell_px
+            xR = xL + cell_px
+            yT = y0 + r * cell_px
+            yB = yT + cell_px
             if cell['N']:
-                ax.plot([cx-0.5, cx+0.5], [cy+0.5, cy+0.5], 'k-', linewidth=wall_width, zorder=2)
+                _line(dr, xL, yT, xR, yT, wall_px)
             if cell['S']:
-                ax.plot([cx-0.5, cx+0.5], [cy-0.5, cy-0.5], 'k-', linewidth=wall_width, zorder=2)
+                _line(dr, xL, yB, xR, yB, wall_px)
             if cell['E']:
-                ax.plot([cx+0.5, cx+0.5], [cy-0.5, cy+0.5], 'k-', linewidth=wall_width, zorder=2)
+                _line(dr, xR, yT, xR, yB, wall_px)
             if cell['W']:
-                ax.plot([cx-0.5, cx-0.5], [cy-0.5, cy+0.5], 'k-', linewidth=wall_width, zorder=2)
+                _line(dr, xL, yT, xL, yB, wall_px)
 
-    # Start/Goal markers at integer centers
+    # Start/Goal knobs at cell centers
     sr, sc = start
     gr, gc = goal
-    ax.scatter(sr, sc, s=300, c='red', edgecolors='none', zorder=3)
-    ax.scatter(gr, gc, s=300, c='green', edgecolors='none', zorder=3)
+    cx_s, cy_s = cell_center_xy(sr, sc, cell_px, x0, y0)
+    cx_g, cy_g = cell_center_xy(gr, gc, cell_px, x0, y0)
+    _circle(dr, cx_s, cy_s, knob_px // 2, (255, 0, 0))
+    _circle(dr, cx_g, cy_g, knob_px // 2, (0, 200, 0))
 
-    plt.tight_layout(pad=0.6)
-    fig.savefig(out_png, dpi=dpi)
-    plt.close(fig)
+    # Axes: numeric ticks and captions
+    if draw_axes:
+        font = _load_font()
+        # Column indices above top border
+        for c in range(cols):
+            cx = x0 + c * cell_px + cell_px // 2
+            dr.text((cx - 3, max(0, y0 - 14)), str(c), fill=(0, 0, 0), font=font)
+        dr.text((x0 + maze_w // 2 - 10, max(0, y0 - 28)), "col", fill=(0, 0, 0), font=font)
+
+        # Row indices left of left border
+        for r in range(rows):
+            cy = y0 + r * cell_px + cell_px // 2
+            dr.text((max(0, x0 - 18), cy - 6), str(r), fill=(0, 0, 0), font=font)
+        dr.text((max(0, x0 - 35), y0 + maze_h // 2 - 6), "row", fill=(0, 0, 0), font=font)
+
+    im.save(out_png)
+
+
+# -------------------------
+# Dataset writer
+# -------------------------
 
 def pick_distinct_cells(rng: random.Random, rows: int, cols: int):
     s = (rng.randrange(rows), rng.randrange(cols))
@@ -195,8 +339,25 @@ def pick_distinct_cells(rng: random.Random, rows: int, cols: int):
         g = (rng.randrange(rows), rng.randrange(cols))
     return s, g
 
-def generate_dataset(count: int, rows: int, cols: int, out_jsonl: str, base_seed: int = 20250924,
-                     png_dir: Optional[str] = None):
+def generate_dataset(
+    count: int, rows: int, cols: int, out_jsonl: str,
+    base_seed: int = 20250924,
+    png_dir: Optional[str] = None,
+    canvas: Tuple[int,int] = (DEF_CANVAS_W, DEF_CANVAS_H),
+    cell_px: Optional[int] = None,
+    anchor: Optional[Tuple[int,int]] = None,
+    wall_px: int = DEF_WALL_PX,
+    knob_px: int = DEF_KNOB_PX,
+    draw_grid: bool = True,
+    draw_axes: bool = True,
+    pads: Tuple[int,int,int,int] = (AXIS_PAD_LEFT, AXIS_PAD_TOP, AXIS_PAD_RIGHT, AXIS_PAD_BOTTOM),
+):
+    """
+    Writes JSONL where each record includes exact geometry:
+      rows, cols, canvas_w, canvas_h, cell_px, x0, y0, wall_px, knob_px,
+      axis_pads: [left, top, right, bottom]
+      maze_bbox: [y0, y0 + rows*cell_px, x0, x0 + cols*cell_px]
+    """
     seen = set()
     made = 0
     idx = 0
@@ -221,9 +382,27 @@ def generate_dataset(count: int, rows: int, cols: int, out_jsonl: str, base_seed
             if not path:
                 continue
 
+            # Exact geometry for this image
+            canvas_w, canvas_h, cell_px_eff, x0, y0 = compute_geometry(rows, cols, canvas, cell_px, anchor, pads)
+            maze_w = cols * cell_px_eff
+            maze_h = rows * cell_px_eff
+            maze_bbox = [y0, y0 + maze_h, x0, x0 + maze_w]
+
             K, labels = aggregate_segments_labels(path, rows, cols)
+
             rec = {
                 "index": made,
+                "rows": rows,
+                "cols": cols,
+                "canvas_w": canvas_w,
+                "canvas_h": canvas_h,
+                "cell_px": cell_px_eff,
+                "x0": x0,
+                "y0": y0,
+                "axis_pads": [pads[0], pads[1], pads[2], pads[3]],
+                "maze_bbox": maze_bbox,
+                "wall_px": wall_px,
+                "knob_px": knob_px,
                 "start_pos": [s[0], s[1]],
                 "end_pos": [g[0], g[1]],
                 "true_path": [[r, c] for (r, c) in path],
@@ -233,33 +412,65 @@ def generate_dataset(count: int, rows: int, cols: int, out_jsonl: str, base_seed
 
             if png_dir:
                 out_png = f"{png_dir}/maze_{made:05d}.png"
-                draw_maze_image(grid, rows, cols, s, g, out_png)
+                draw_maze_image_fixed(
+                    grid, rows, cols,
+                    canvas_w=canvas_w, canvas_h=canvas_h,
+                    cell_px=cell_px_eff, x0=x0, y0=y0,
+                    wall_px=wall_px, knob_px=knob_px,
+                    draw_grid=draw_grid, draw_axes=draw_axes, pads=pads,
+                    start=s, goal=g, out_png=out_png,
+                )
 
             made += 1
     return made, len(seen)
 
+
+# -------------------------
+# CLI
+# -------------------------
+
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="Maze image and dataset generator.")
+    parser = argparse.ArgumentParser(description="Maze image and dataset generator (fixed geometry + axes).")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_img = sub.add_parser("image", help="Generate a single maze PNG.")
-    p_img.add_argument("--rows", type=int, default=5)
-    p_img.add_argument("--cols", type=int, default=5)
+    p_img = sub.add_parser("image", help="Generate a single maze PNG with axes.")
+    p_img.add_argument("--rows", type=int, default=10)
+    p_img.add_argument("--cols", type=int, default=10)
     p_img.add_argument("--seed", type=int, default=42)
     p_img.add_argument("--start", type=str, default=None, help="start 'r,c' (optional)")
     p_img.add_argument("--goal", type=str, default=None, help="goal 'r,c' (optional)")
+    p_img.add_argument("--canvas", type=str, default=None, help="W,H (default 720,480)")
+    p_img.add_argument("--cell_px", type=int, default=None, help="Fixed cell size in px (optional)")
+    p_img.add_argument("--anchor", type=str, default=None, help="x0,y0 (optional absolute top-left of maze rect)")
+    p_img.add_argument("--wall_px", type=int, default=DEF_WALL_PX)
+    p_img.add_argument("--knob_px", type=int, default=DEF_KNOB_PX)
+    p_img.add_argument("--no-grid", action="store_true")
+    p_img.add_argument("--no-axes", action="store_true")
     p_img.add_argument("--out", type=str, required=True)
 
-    p_ds = sub.add_parser("dataset", help="Generate a JSONL dataset of unique mazes.")
+    p_ds = sub.add_parser("dataset", help="Generate JSONL (+PNGs) with axes and precise geometry.")
     p_ds.add_argument("--count", type=int, default=5000)
     p_ds.add_argument("--rows", type=int, default=10)
     p_ds.add_argument("--cols", type=int, default=10)
     p_ds.add_argument("--out", type=str, default="info_labels.jsonl")
-    p_ds.add_argument("--base-seed", type=int, default=20250924)
+    p_ds.add_argument("--base-seed", type=int, default=20250932)
     p_ds.add_argument("--png-dir", type=str, default=None, help="Directory to write per-maze PNGs")
 
+    p_ds.add_argument("--canvas", type=str, default=None, help="W,H (default 720,480)")
+    p_ds.add_argument("--cell_px", type=int, default=None, help="Fixed cell size in px (optional)")
+    p_ds.add_argument("--anchor", type=str, default=None, help="x0,y0 (optional absolute top-left of maze rect)")
+    p_ds.add_argument("--wall_px", type=int, default=DEF_WALL_PX)
+    p_ds.add_argument("--knob_px", type=int, default=DEF_KNOB_PX)
+    p_ds.add_argument("--no-grid", action="store_true")
+    p_ds.add_argument("--no-axes", action="store_true")
+
     args = parser.parse_args()
+
+    def _parse_pair(s, default_pair):
+        if s is None:
+            return default_pair
+        a, b = s.split(",")
+        return (int(a), int(b))
 
     if args.cmd == "image":
         rng = random.Random(args.seed)
@@ -274,22 +485,48 @@ def main():
             return int(r), int(c)
 
         start = parse_rc(args.start)
-        goal = parse_rc(args.goal)
+        goal  = parse_rc(args.goal)
         if start is None or goal is None:
             s, g = pick_distinct_cells(rng, rows, cols)
         else:
             s, g = start, goal
 
-        draw_maze_image(grid, rows, cols, s, g, args.out)
+        canvas = _parse_pair(args.canvas, (DEF_CANVAS_W, DEF_CANVAS_H))
+        anchor = _parse_pair(args.anchor, None)
+        pads = (AXIS_PAD_LEFT, AXIS_PAD_TOP, AXIS_PAD_RIGHT, AXIS_PAD_BOTTOM)
+
+        W, H, cell_px, x0, y0 = compute_geometry(
+            rows, cols, canvas, args.cell_px, anchor, pads
+        )
+        draw_maze_image_fixed(
+            grid, rows, cols,
+            canvas_w=W, canvas_h=H,
+            cell_px=cell_px, x0=x0, y0=y0,
+            wall_px=args.wall_px, knob_px=args.knob_px,
+            draw_grid=not args.no_grid, draw_axes=not args.no_axes, pads=pads,
+            start=s, goal=g, out_png=args.out
+        )
 
     elif args.cmd == "dataset":
+        canvas = _parse_pair(args.canvas, (DEF_CANVAS_W, DEF_CANVAS_H))
+        anchor = _parse_pair(args.anchor, None)
+        pads = (AXIS_PAD_LEFT, AXIS_PAD_TOP, AXIS_PAD_RIGHT, AXIS_PAD_BOTTOM)
+
         made, uniq = generate_dataset(
             count=args.count,
             rows=args.rows,
             cols=args.cols,
             out_jsonl=args.out,
             base_seed=args.base_seed,
-            png_dir=args.png_dir
+            png_dir=args.png_dir,
+            canvas=canvas,
+            cell_px=args.cell_px,
+            anchor=anchor,
+            wall_px=args.wall_px,
+            knob_px=args.knob_px,
+            draw_grid=not args.no_grid,
+            draw_axes=not args.no_axes,
+            pads=pads,
         )
         print(f"Wrote {made} records to {args.out} (unique mazes: {uniq}).")
         if args.png_dir:

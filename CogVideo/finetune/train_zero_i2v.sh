@@ -13,7 +13,7 @@ MODEL_ARGS=(
 
 # Output Configuration
 OUTPUT_ARGS=(
-    --output_dir "/project/sds-rise/ethan/explore_diffusion_spatial/model_finetuned/raw/CogVideoX-2b-31in-16out"
+    --output_dir "/project/sds-rise/ethan/explore_diffusion_spatial/model_finetuned/raw/CogVideoX-2b-32in-16out-7by7"
     --report_to "wandb"
 )
 
@@ -28,7 +28,7 @@ DATA_ARGS=(
 
 # Training Configuration
 TRAIN_ARGS=(
-    --train_epochs 30 # number of training epochs
+    --train_epochs 10 # number of training epochs
     --seed 42 # random seed
 
     #########   Please keep consistent with deepspeed config file ##########

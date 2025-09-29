@@ -49,7 +49,7 @@ from finetune.utils import (
     unwrap_model,
 )
 
-from CogVideo.finetune.dataloader.loader import build_all_loaders
+from CogVideo.finetune.dataloader.maze_dataset import build_all_loaders
 
 
 logger = get_logger(LOG_NAME, LOG_LEVEL)
@@ -189,45 +189,32 @@ class Trainer:
         self.components.text_encoder = self.components.text_encoder.to(device, dtype=dtype)
 
     def _build_datasets(self):
-        train_jsonl = "/project/sds-rise/ethan/SpaDiff_imgin_fresh_start/datasets/maze/10000maze_720_480/info_labels.jsonl"
-        train_images = "/project/sds-rise/ethan/SpaDiff_imgin_fresh_start/datasets/maze/10000maze_720_480/images"
-        val_jsonl   = "/project/sds-rise/ethan/SpaDiff_imgin_fresh_start/datasets/maze/validation/info_labels.jsonl"
-        val_images  = "/project/sds-rise/ethan/SpaDiff_imgin_fresh_start/datasets/maze/validation/images"
-        test_jsonl  = "/project/sds-rise/ethan/SpaDiff_imgin_fresh_start/datasets/maze/evaluation/info_labels.jsonl"
-        test_images = "/project/sds-rise/ethan/SpaDiff_imgin_fresh_start/datasets/maze/evaluation/images"
+        TRAIN_JSONL = "/project/sds-rise/ethan/explore_diffusion_spatial/datasets/7by7/basic/train/info_labels.jsonl"
+        TRAIN_IMG   = "/project/sds-rise/ethan/explore_diffusion_spatial/datasets/7by7/basic/train/images"
+        TRAIN_PRM   = "/project/sds-rise/ethan/explore_diffusion_spatial/datasets/7by7/basic/train/prompts.txt"
 
-        (train_ds, _), (val_ds, _), (test_ds, _) = build_all_loaders(
-            train_jsonl=train_jsonl, train_images=train_images,
-            val_jsonl=val_jsonl, val_images=val_images,
-            test_jsonl=test_jsonl, test_images=test_images,
-            batch_size=self.args.batch_size,
-            num_workers=self.args.num_workers,
-            seq_len=self.state.train_frames,
-            return_flow_seq=False,
-            return_image_bg=True,
-            return_hsv_seq=True,
-            return_hsv_channels_seq=False,
-            return_prompt=True,
-            hsv_clip_mag=None,
-            hsv_saturation=1.0,
+        VAL_JSONL   = "/project/sds-rise/ethan/explore_diffusion_spatial/datasets/7by7/basic/val/info_labels.jsonl"
+        VAL_IMG     = "/project/sds-rise/ethan/explore_diffusion_spatial/datasets/7by7/basic/val/images"
+        VAL_PRM     = "/project/sds-rise/ethan/explore_diffusion_spatial/datasets/7by7/basic/val/prompts.txt"
+
+        TEST_JSONL  = "/project/sds-rise/ethan/explore_diffusion_spatial/datasets/7by7/basic/test/info_labels.jsonl"
+        TEST_IMG    = "/project/sds-rise/ethan/explore_diffusion_spatial/datasets/7by7/basic/test/images"
+        TEST_PRM    = "/project/sds-rise/ethan/explore_diffusion_spatial/datasets/7by7/basic/test/prompts.txt"
+
+        (train_ds, train_dl), (val_ds, val_dl), (test_ds, test_dl) = build_all_loaders(
+            train_jsonl=TRAIN_JSONL, train_images=TRAIN_IMG, train_prompts=TRAIN_PRM,
+            val_jsonl=VAL_JSONL,     val_images=VAL_IMG,     val_prompts=VAL_PRM,
+            test_jsonl=TEST_JSONL,   test_images=TEST_IMG,   test_prompts=TEST_PRM,
+            batch_size=1, num_workers=0,
+            num_frames=49, assert_geometry_match=True, shuffle_train=True
         )
         return train_ds, val_ds, test_ds
 
     def _build_dataloaders(self, train_ds, val_ds, test_ds):
         from torch.utils.data import DataLoader
-        from CogVideo.finetune.dataloader.flow_norm import load_stats, make_normalizing_collate
         from torch.utils.data._utils.collate import default_collate
-        import os
 
-        stats_path = os.path.join("CogVideo/dataloader", "flow_norm_stats_10000maze.json")
-
-        try:
-            scale_mag = load_stats(stats_path)["max_mag"]
-            logger.info(f"Loaded flow normalization scale_mag: {scale_mag}")
-            collate_fn = make_normalizing_collate(default_collate, scale_mag, key="flow", mode="mag", clip=True)
-        except FileNotFoundError:
-            logger.warning(f"Flow normalization stats not found at {stats_path}, using unnormalized data")
-            collate_fn = default_collate
+        collate_fn = default_collate
 
         train_dl = DataLoader(train_ds, batch_size=self.args.batch_size, shuffle=True,
                             collate_fn=collate_fn, num_workers=self.args.num_workers,
